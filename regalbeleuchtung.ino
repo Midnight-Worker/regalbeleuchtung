@@ -8,8 +8,6 @@
 #define LED_COUNT   72
 #define BRIGHTNESS  40
 
-#define COMMAND_TIMEOUT_MS 150
-
 Adafruit_NeoPixel strip(
   LED_COUNT,
   LED_PIN,
@@ -121,13 +119,11 @@ const LedObjekt leds[] = {
 };
 
 // -------------------------
-// UART-Eingabepuffer
+// UART-Befehlspuffer
 // -------------------------
 
-char befehlFarbe = 0;
-int befehlNummer = 0;
-bool leseNummer = false;
-unsigned long letzteEingabeZeit = 0;
+char commandBuffer[16];
+uint8_t commandIndex = 0;
 
 // -------------------------
 // Setup
@@ -141,28 +137,14 @@ void setup() {
   strip.clear();
   strip.show();
 
-  // Kurzer LED-Test beim Start:
-  // Wenn das nicht leuchtet, liegt das Problem NICHT am UART,
-  // sondern eher an Pin, Verdrahtung, Stromversorgung oder LED-Typ.
+  // kurzer Starttest
   strip.setPixelColor(0, strip.Color(255, 0, 0));
   strip.show();
-  delay(500);
-
+  delay(250);
   strip.clear();
   strip.show();
 
-  Serial.println();
-  Serial.println("WS2812 UART Steuerung bereit.");
-  Serial.println("Befehle:");
-  Serial.println("r27 = LED 27 rot");
-  Serial.println("g1  = LED 1 gruen");
-  Serial.println("b5  = LED 5 blau");
-  Serial.println("w72 = LED 72 weiss");
-  Serial.println("t10 = LED 10 tuerkis");
-  Serial.println("y32 = LED 32 gelb");
-  Serial.println("o32 = LED 32 aus");
-  Serial.println();
-  Serial.println("Trennzeichen wie Komma oder Enter sind erlaubt, aber nicht mehr zwingend.");
+  printHelp();
 }
 
 // -------------------------
@@ -174,72 +156,126 @@ void loop() {
     char zeichen = Serial.read();
     verarbeiteZeichen(zeichen);
   }
-
-  // Automatisch ausführen, wenn nach der letzten Ziffer kurz nichts mehr kam.
-  if (leseNummer && befehlNummer > 0) {
-    if (millis() - letzteEingabeZeit > COMMAND_TIMEOUT_MS) {
-      fuehreBefehlAus();
-      resetBefehl();
-    }
-  }
 }
 
 // -------------------------
-// Einzelnes UART-Zeichen verarbeiten
+// Hilfe ausgeben
+// -------------------------
+
+void printHelp() {
+  Serial.println();
+  Serial.println("WS2812 UART Steuerung bereit.");
+  Serial.println();
+  Serial.println("Einzelne LEDs:");
+  Serial.println("r27  = LED 27 rot");
+  Serial.println("g1   = LED 1 gruen");
+  Serial.println("b5   = LED 5 blau");
+  Serial.println("w72  = LED 72 weiss");
+  Serial.println("t10  = LED 10 tuerkis");
+  Serial.println("y32  = LED 32 gelb");
+  Serial.println("o32  = LED 32 aus");
+  Serial.println();
+  Serial.println("Alle LEDs:");
+  Serial.println("ar   = alle rot");
+  Serial.println("ag   = alle gruen");
+  Serial.println("ab   = alle blau");
+  Serial.println("aw   = alle weiss");
+  Serial.println("at   = alle tuerkis");
+  Serial.println("ay   = alle gelb");
+  Serial.println("ao   = alle aus");
+  Serial.println();
+  Serial.println("Demo:");
+  Serial.println("s    = Strandtest starten");
+  Serial.println();
+}
+
+// -------------------------
+// Zeichen sammeln
 // -------------------------
 
 void verarbeiteZeichen(char zeichen) {
   zeichen = tolower(zeichen);
-  letzteEingabeZeit = millis();
 
-  // Debug-Ausgabe: zeigt, dass überhaupt Zeichen ankommen
-  Serial.print("Empfangen: ");
-  if (zeichen == '\n') {
-    Serial.println("\\n");
-  } else if (zeichen == '\r') {
-    Serial.println("\\r");
+  // Enter, Komma, Leerzeichen usw. führen den Befehl aus
+  if (zeichen == '\n' || zeichen == '\r' || zeichen == ',' || zeichen == ' ') {
+    if (commandIndex > 0) {
+      commandBuffer[commandIndex] = '\0';
+      verarbeiteBefehl(commandBuffer);
+      commandIndex = 0;
+    }
+    return;
+  }
+
+  // Zeichen in Buffer schreiben
+  if (commandIndex < sizeof(commandBuffer) - 1) {
+    commandBuffer[commandIndex] = zeichen;
+    commandIndex++;
   } else {
-    Serial.println(zeichen);
+    Serial.println("Fehler: Befehl zu lang.");
+    commandIndex = 0;
   }
-
-  // Neuer Farbbefehl beginnt
-  if (istFarbBefehl(zeichen)) {
-    befehlFarbe = zeichen;
-    befehlNummer = 0;
-    leseNummer = true;
-
-    Serial.print("Farbe erkannt: ");
-    Serial.println(befehlFarbe);
-    return;
-  }
-
-  // Ziffern nach dem Farbbefehl sammeln
-  if (leseNummer && isDigit(zeichen)) {
-    befehlNummer = befehlNummer * 10 + (zeichen - '0');
-
-    Serial.print("Nummer bisher: ");
-    Serial.println(befehlNummer);
-    return;
-  }
-
-  // Trennzeichen: Befehl sofort ausführen
-  if (leseNummer && befehlNummer > 0) {
-    fuehreBefehlAus();
-    resetBefehl();
-    return;
-  }
-
-  // Irgendwas anderes ignorieren
 }
 
 // -------------------------
-// Befehl zurücksetzen
+// Komplette Befehle auswerten
 // -------------------------
 
-void resetBefehl() {
-  befehlFarbe = 0;
-  befehlNummer = 0;
-  leseNummer = false;
+void verarbeiteBefehl(const char* befehl) {
+  Serial.print("Befehl empfangen: ");
+  Serial.println(befehl);
+
+  // Strandtest
+  if (befehl[0] == 's' && befehl[1] == '\0') {
+    Serial.println("Starte Strandtest...");
+    strandTest();
+    Serial.println("Strandtest fertig.");
+    return;
+  }
+
+  // Alle LEDs setzen: ar, ag, ab, aw, at, ay, ao
+  if (befehl[0] == 'a') {
+    char farbBefehl = befehl[1];
+
+    if (!istFarbBefehl(farbBefehl)) {
+      Serial.println("Fehler: ungueltiger Alle-LEDs-Farbbefehl.");
+      Serial.println("Beispiele: ar, ag, ab, aw, at, ay, ao");
+      return;
+    }
+
+    uint32_t farbe = farbeAusBefehl(farbBefehl);
+    setAllLeds(farbe);
+    strip.show();
+
+    Serial.print("OK: alle LEDs gesetzt auf ");
+    Serial.println(farbBefehl);
+    return;
+  }
+
+  // Einzelne LED setzen: r27, g1, y32, o32 usw.
+  char farbBefehl = befehl[0];
+
+  if (!istFarbBefehl(farbBefehl)) {
+    Serial.println("Fehler: unbekannter Befehl.");
+    return;
+  }
+
+  int nummer = atoi(&befehl[1]);
+
+  if (nummer < 1 || nummer > 72) {
+    Serial.print("Fehler: LED-Nummer ungueltig: ");
+    Serial.println(nummer);
+    return;
+  }
+
+  uint32_t farbe = farbeAusBefehl(farbBefehl);
+
+  setLedByNumber(nummer, farbe);
+  strip.show();
+
+  Serial.print("OK: LED ");
+  Serial.print(nummer);
+  Serial.print(" gesetzt auf ");
+  Serial.println(farbBefehl);
 }
 
 // -------------------------
@@ -254,33 +290,6 @@ bool istFarbBefehl(char zeichen) {
          zeichen == 't' ||
          zeichen == 'y' ||
          zeichen == 'o';
-}
-
-// -------------------------
-// Befehl ausführen
-// -------------------------
-
-void fuehreBefehlAus() {
-  if (!istFarbBefehl(befehlFarbe)) {
-    Serial.println("Fehler: Kein gueltiger Farbbefehl.");
-    return;
-  }
-
-  if (befehlNummer < 1 || befehlNummer > 72) {
-    Serial.print("Fehler: LED-Nummer ungueltig: ");
-    Serial.println(befehlNummer);
-    return;
-  }
-
-  uint32_t farbe = farbeAusBefehl(befehlFarbe);
-
-  setLedByNumber(befehlNummer, farbe);
-  strip.show();
-
-  Serial.print("OK: LED ");
-  Serial.print(befehlNummer);
-  Serial.print(" gesetzt auf ");
-  Serial.println(befehlFarbe);
 }
 
 // -------------------------
@@ -316,7 +325,7 @@ uint32_t farbeAusBefehl(char farbe) {
 }
 
 // -------------------------
-// Logische LED-Nummer setzen
+// Einzelne logische LED setzen
 // -------------------------
 
 void setLedByNumber(uint8_t nummer, uint32_t farbe) {
@@ -329,4 +338,90 @@ void setLedByNumber(uint8_t nummer, uint32_t farbe) {
   Serial.println(pixel);
 
   strip.setPixelColor(pixel, farbe);
+}
+
+// -------------------------
+// Alle logischen LEDs setzen
+// -------------------------
+
+void setAllLeds(uint32_t farbe) {
+  for (uint8_t nummer = 1; nummer <= 72; nummer++) {
+    uint8_t index = nummer - 1;
+    uint8_t pixel = leds[index].pixel;
+    strip.setPixelColor(pixel, farbe);
+  }
+}
+
+// -------------------------
+// Strandtest / Demo
+// -------------------------
+
+void strandTest() {
+  colorWipe(strip.Color(255, 0, 0), 30);     // Rot
+  colorWipe(strip.Color(0, 255, 0), 30);     // Gruen
+  colorWipe(strip.Color(0, 0, 255), 30);     // Blau
+  colorWipe(strip.Color(255, 255, 0), 30);   // Gelb
+  colorWipe(strip.Color(0, 255, 255), 30);   // Tuerkis
+  colorWipe(strip.Color(255, 255, 255), 30); // Weiss
+
+  theaterChase(strip.Color(127, 127, 127), 50);
+  theaterChase(strip.Color(127, 0, 0), 50);
+  theaterChase(strip.Color(0, 0, 127), 50);
+
+  rainbow(5);
+
+  strip.clear();
+  strip.show();
+}
+
+// -------------------------
+// Strandtest-Helfer: Farbwischer
+// -------------------------
+
+void colorWipe(uint32_t farbe, int wartezeit) {
+  strip.clear();
+
+  for (uint8_t nummer = 1; nummer <= 72; nummer++) {
+    uint8_t index = nummer - 1;
+    uint8_t pixel = leds[index].pixel;
+
+    strip.setPixelColor(pixel, farbe);
+    strip.show();
+    delay(wartezeit);
+  }
+}
+
+// -------------------------
+// Strandtest-Helfer: Theater Chase
+// -------------------------
+
+void theaterChase(uint32_t farbe, int wartezeit) {
+  for (int durchlauf = 0; durchlauf < 10; durchlauf++) {
+    for (int offset = 0; offset < 3; offset++) {
+      strip.clear();
+
+      for (int pixel = offset; pixel < LED_COUNT; pixel += 3) {
+        strip.setPixelColor(pixel, farbe);
+      }
+
+      strip.show();
+      delay(wartezeit);
+    }
+  }
+}
+
+// -------------------------
+// Strandtest-Helfer: Regenbogen
+// -------------------------
+
+void rainbow(int wartezeit) {
+  for (long firstPixelHue = 0; firstPixelHue < 3 * 65536; firstPixelHue += 256) {
+    for (int pixel = 0; pixel < LED_COUNT; pixel++) {
+      int pixelHue = firstPixelHue + (pixel * 65536L / LED_COUNT);
+      strip.setPixelColor(pixel, strip.gamma32(strip.ColorHSV(pixelHue)));
+    }
+
+    strip.show();
+    delay(wartezeit);
+  }
 }
